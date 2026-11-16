@@ -15,11 +15,12 @@ NUAA（南京航空航天大学）「飞天云课堂」课程录像与 AI 字幕
 
 ## 功能特性
 
-- 🔐 **扫码登录**：走学校统一身份认证的二维码流程，全程不需要提供账号密码
-- 📋 **课表列出**：一个课堂（教学班）下的所有课次录像，含上课时间与授课教师
-- 🎬 **原片下载**：1080p H.264 MP4 直链，4 路并行分段下载 + 合并 + ffprobe 时长校验
-- 💬 **AI 字幕**：拉取平台 AI 转写字幕并转换为通用 SRT 格式（UTF-8 BOM）
-- 🧹 **凭据卫生**：jwt 登录态只写在 `/tmp` 临时文件，流程结束即清理
+- 🌐 **本地 Web 控制台**：开箱即用的单页 Web 界面（`gui.py` + `start.bat`），支持 Windows / macOS
+- 🔐 **扫码登录**：走学校统一身份认证的二维码流程，全程不需要提供账号密码，网页端内嵌实时二维码与状态轮询
+- 📋 **课程与课次管理**：同步本学期全部课程、关键词过滤或粘贴课程链接直达，支持单课操作或勾选批量操作
+- 📝 **课堂字幕导出 Markdown**：将平台 AI 转写字幕按自定义时间锚点（1 / 3 / 5 / 10 分钟）清洗排版为单节 `.md` 与 `00_全课复习文稿汇总.md`
+- 🎬 **原片下载与实时监控**：1080p H.264 MP4 直链，4 路并行分段下载 + 字节级实时进度、速度（MB/s）、ETA 与分段进度条，支持中途取消与 ffprobe 时长校验
+- 🧹 **凭据卫生**：jwt 登录态只写在系统临时目录文件（`0600` 权限），支持界面一键清除
 
 ## 环境要求
 
@@ -47,28 +48,63 @@ git clone https://github.com/jaluova/nuaa-course-video.git ~/.agents/skills/nuaa
 
 > 帮我下载 ft.nuaa.edu.cn 上 09-03 8:55 那节课的录像和字幕
 
+## Web 控制台（GUI）使用指南（推荐 ⭐）
+
+本项目内置了跨平台（Windows / macOS）本地 Web 控制台 [`gui.py`](gui.py)，无需记忆命令行参数即可完成**扫码登录、课程检索、导出 `.md` 课堂字幕文稿与 MP4 录像原片下载**。
+
+### 1. 启动方式
+
+- **Windows 用户**：直接双击仓库根目录下的 [`start.bat`](start.bat)（或 [`启动GUI.bat`](启动GUI.bat)），或在终端运行：
+  ```powershell
+  python gui.py
+  ```
+- **macOS / Linux 用户**：
+  ```bash
+  python3 gui.py
+  ```
+
+启动后会自动在默认浏览器打开 `http://127.0.0.1:8765`（端口被占用时自动顺延）。
+
+### 2. 操作流程
+
+1. **扫码登录（左侧 `AUTH` 卡片）**
+   点击 **「🔐 启动扫码登录」**，网页内会立即显示统一身份认证二维码。使用手机（南航 App 或微信）扫码并在手机端确认，页面会自动获取令牌并同步本学期全部课程列表。
+2. **选择课程（右侧 `STEP 01`）**
+   - 在课程列表中**单击**目标课程行，即可自动加载该课堂的全部课次（支持按课程名、教师、班级关键词实时过滤）；
+   - 或者直接粘贴飞天云课堂网页链接（`.../video-detail?id=NNN`）或输入数字 `teclId`，点击 **「➡️ 直达加载课次」**。
+3. **导出 `.md` 文稿或下载 MP4 视频（右侧 `STEP 02`）**
+   - **导出 Markdown 复习文稿**：可选择时间锚点间隔（`1 / 3 / 5 / 10 分钟`），点击单节课右侧 **「📝 导出 .md」**，或点击上方 **「🚀 一键导出本课【全部课次】.md 文稿与汇总」**。输出保存在 `output/<课程名>_<teclId>/` 目录下，包含单讲 `.md` 及 `00_全课复习文稿汇总.md`。
+   - **下载 1080p MP4 原片**：点击单节课右侧 **「🎬 下载 MP4」**，或勾选多节课后点击 **「🎬 批量下载勾选课次 MP4 视频」**。
+4. **实时进度监控（左侧 `PROGRESS` 卡片）**
+   - 执行导出或下载时，实时显示当前阶段（请求直链 / 探测大小 / 4 线程并行下载 / 合并写入）、已下载/总大小（MB）、实时网速（MB/s）、预计剩余时间（ETA）及 4 通道分段进度条；
+   - 支持点击 **「🛑 取消任务」** 随时中止后台任务并清理临时分段文件。
+
+---
+
 ## 命令行直接使用（不需要 ZCode）
 
 ```bash
 # 0. 只知道课名时: 列出本学期全部课程, 找到 teclId(支持关键词过滤)
-python3 scripts/nuaa_api.py courses 软件工程
+python scripts/nuaa_api.py courses 软件工程
 
-# 1. 扫码登录（生成二维码并等待手机确认；默认不弹窗，只打印图片路径；登录态写入 /tmp/nuaa-skill-state.json）
-python3 scripts/qr_login.py \
-  "https://ft.nuaa.edu.cn/jy-application-vod-he-ui/#/video-detail?id=<teclId>"
+# 1. 扫码登录（生成二维码并等待手机确认；加 --open 可用系统查看器弹出二维码图片）
+python scripts/qr_login.py --open
 
 # 2. 列出该课堂的全部课次录像（teclId = 页面 URL 里的 id 参数）
-python3 scripts/nuaa_api.py list <teclId>
+python scripts/nuaa_api.py list <teclId>
 # → id=1234567 | 2025-09-01 14:00:00 ~ 14:50:00 | 某某老师 | ...
 
-# 3. 取某节课的 MP4 播放直链（带 auth_key 签名，有时效，拿到尽快下）
-python3 scripts/nuaa_api.py url <courseId>
+# 3. 一键批量导出整门课全部字幕 (单课清洗版 .md + 00_全课复习文稿汇总.md)
+python scripts/nuaa_api.py subtitles-all <teclId> ./output/我的课程字幕
 
-# 4. 并行分段下载 + 合并 + 校验
-python3 scripts/download_mp4.py "<mp4_url>" ~/Downloads/课程名_教师_日期_时间.mp4
+# 4. 拉取单节课 AI 字幕转 SRT
+python scripts/nuaa_api.py subtitle <courseId> ./output/课程名.srt
 
-# 5. AI 字幕转 SRT（平台还没生成字幕时会明确提示，稍后再试）
-python3 scripts/nuaa_api.py subtitle <courseId> ~/Downloads/课程名.srt
+# 5. 取某节课的 MP4 播放直链（带 auth_key 签名，有时效，拿到尽快下）
+python scripts/nuaa_api.py url <courseId>
+
+# 6. 并行分段下载 + 合并 + 校验
+python scripts/download_mp4.py "<mp4_url>" ./output/课程名_教师_日期_时间.mp4
 ```
 
 > 播放地址过期（下载中途 403）时，重新执行第 3 步换新地址，再跑第 4 步即可。
@@ -121,11 +157,14 @@ nuaa-course-video/          ← 仓库根 = 技能根
 ├── SKILL.md                # 技能定义（触发条件/流程/实测要点/排障）
 ├── README.md
 ├── LICENSE
+├── gui.py                  # 本地 Web 控制台（扫码/课程管理/.md导出/MP4实时进度下载）
+├── start.bat               # Windows 一键启动脚本
+├── 启动GUI.bat             # Windows 中文快捷启动入口
 └── scripts/
     ├── qr_login.py         # 无头 Chrome + 二维码登录 → state 文件
     ├── nuaa_aes.py         # courseId AES 加密（含站点样本自检）
-    ├── nuaa_api.py         # list / url / subtitle
-    └── download_mp4.py     # 并行分段下载 + 合并 + 校验
+    ├── nuaa_api.py         # courses / list / url / subtitle / subtitles-all
+    └── download_mp4.py     # 并行分段下载 + 实时字节级进度 + 合并校验
 ```
 
 ## 已知限制

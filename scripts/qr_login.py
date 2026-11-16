@@ -18,16 +18,59 @@
 - 登录成功后 sessionStorage 键: jy-application-vod-he-ui_STORAGE_KEY_JWT_TOKEN
                             与 jy-application-vod-he-ui_STORAGE_KEY_TENANT_ID
 """
-import asyncio, json, os, signal, socket, subprocess, sys, tempfile, time, urllib.request
+import asyncio, json, os, shutil, signal, socket, subprocess, sys, tempfile, time, urllib.request
 from pathlib import Path
 
-STATE_DEFAULT = "/tmp/nuaa-skill-state.json"
-QR_PNG = "/tmp/nuaa-qr.png"
+TMP_DIR = "/tmp" if os.name != "nt" and os.path.isdir("/tmp") else tempfile.gettempdir()
+STATE_DEFAULT = os.path.join(TMP_DIR, "nuaa-skill-state.json")
+QR_PNG = os.path.join(TMP_DIR, "nuaa-qr.png")
+LOG_PATH = os.path.join(TMP_DIR, "nuaa-qr-login.log")
 VENV_DIR = os.path.expanduser("~/.cache/nuaa-course-video/venv")
-CHROME = os.environ.get("CHROME_BIN",
-                        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+CURL_BIN = "curl.exe" if os.name == "nt" else "curl"
+
+# 仅对本地环回地址 (127.0.0.1 / localhost) 绕过代理, 保留用户访问校内/外网所需的系统代理:
+os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+os.environ["no_proxy"] = "127.0.0.1,localhost"
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _find_chrome():
+    env_bin = os.environ.get("CHROME_BIN")
+    if env_bin and os.path.exists(env_bin):
+        return env_bin
+    candidates = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    ]
+    if os.name == "nt":
+        for env_var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+            base = os.environ.get(env_var)
+            if base:
+                candidates.append(os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"))
+        for env_var in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
+            base = os.environ.get(env_var)
+            if base:
+                candidates.append(os.path.join(base, "Microsoft", "Edge", "Application", "msedge.exe"))
+    for name in ("google-chrome", "chrome", "chromium", "msedge"):
+        which_path = shutil.which(name)
+        if which_path:
+            candidates.append(which_path)
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return candidates[0]
+
+
+CHROME = _find_chrome()
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" if os.name == "nt" else
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+
+def _venv_python():
+    if os.name == "nt":
+        return os.path.join(VENV_DIR, "Scripts", "python.exe")
+    return os.path.join(VENV_DIR, "bin", "python3")
 
 
 def bootstrap_venv():
@@ -38,11 +81,14 @@ def bootstrap_venv():
     except ImportError:
         pass
     py = sys.executable
+    vpy = _venv_python()
     os.makedirs(os.path.dirname(VENV_DIR), exist_ok=True)
-    if not os.path.exists(VENV_DIR + "/bin/python3"):
+    if not os.path.exists(vpy):
         subprocess.run([py, "-m", "venv", VENV_DIR], check=True)
-    subprocess.run([VENV_DIR + "/bin/pip", "install", "-q", "websockets", "pycryptodome"], check=True)
-    os.execv(VENV_DIR + "/bin/python3", [VENV_DIR + "/bin/python3"] + sys.argv)
+    subprocess.run([vpy, "-m", "pip", "install", "-q", "websockets", "pycryptodome"], check=True)
+    if os.name == "nt":
+        sys.exit(subprocess.call([vpy] + sys.argv))
+    os.execv(vpy, [vpy] + sys.argv)
 
 
 bootstrap_venv()
@@ -66,10 +112,13 @@ def is_png(path):
 def show_qr(path):
     """默认只打印二维码路径(供对话内/ZCode 内联展示), 不弹任何窗口;
 
-    显式传 --open 时, macOS 才经 Preview 弹出(独立终端场景可选)。
+    显式传 --open 时, macOS 经 Preview / Windows 经系统默认图片查看器弹出。
     历史参数 --no-open 仍接受, 行为与默认一致, 已有调用不受影响。"""
-    if "--open" in sys.argv and sys.platform == "darwin":
-        subprocess.run(["open", path])
+    if "--open" in sys.argv:
+        if sys.platform == "darwin":
+            subprocess.run(["open", path])
+        elif os.name == "nt":
+            os.startfile(path)
     else:
         print("QR_PNG_PATH=" + path)
 
@@ -85,72 +134,69 @@ async def cdp_eval(ws, n, expr):
 
 async def wait_for_target(port, timeout=90):
     deadline = time.time() + timeout
+    last_err = None
     while time.time() < deadline:
         try:
-            targets = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list",
-                                                        timeout=3).read())
-            pages = [t for t in targets if t["type"] == "page"]
-            # 只认 http(s) 页面: 机器上若装过浏览器扩展, 扩展的后台页
-            # (chrome-extension://...) 可能先于目标标签页出现, 附着上去
-            # 就会永远等不到 SSO 跳转。必须按 URL 挑课程标签页。
-            good = [t for t in pages if t["url"].startswith(("http://", "https://"))]
+            raw = _DIRECT_OPENER.open(f"http://127.0.0.1:{port}/json/list", timeout=3).read()
+            targets = json.loads(raw)
+            pages = [t for t in targets if t.get("type") == "page"]
+            good = [t for t in pages if t.get("url", "").startswith(("http://", "https://"))]
             if good:
                 return good
-            if pages:
-                return [t for t in pages if not t["url"].startswith("chrome://")] or pages
-        except Exception:
-            pass
-        await asyncio.sleep(1)
-    raise RuntimeError("CDP target not available in time")
+        except Exception as e:
+            last_err = e
+        await asyncio.sleep(0.5)
+    raise RuntimeError(f"CDP target not available in time (last_err={last_err})")
 
 
-async def qr_loop(ws):
-    """生成二维码(curl 直连后端) -> 展示 -> 轮询, 直到用户扫码确认。
+def _curl_get(path):
+    url = "https://authserver.nuaa.edu.cn" + path
+    return subprocess.run([CURL_BIN, "-s", "--max-time", "10", url],
+                          capture_output=True, text=True,
+                          encoding="utf-8", errors="replace").stdout
 
-    令牌/图片/状态接口一律走 curl(无会话即可用, 实测可靠);
-    页面内 fetch 会被登录页 JS 补丁干扰返回 {}, 不要用。
-    只有最后的登录提交必须在页面会话内完成(form.submit())。"""
-    counter = [1]
+
+def generate_qr_sync():
+    """立即通过后端接口生成二维码 PNG 并打印路径 (无需等待无头浏览器加载完 SPA)。"""
+    token = _curl_get(f"/authserver/qrCode/getToken?ts={int(time.time()*1000)}").strip()
+    if not token or token.startswith("{") or "<" in token:
+        raise RuntimeError("getToken failed: " + str(token)[:100])
+    qr_png = Path(QR_PNG).resolve()
+    allowed_qr_dirs = [Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve()]
+    if os.name != "nt":
+        allowed_qr_dirs.append(Path("/private/tmp"))
+    if not any(qr_png == d or qr_png.is_relative_to(d) for d in allowed_qr_dirs):
+        raise RuntimeError(f"unexpected qr path: {qr_png}")
+    with open(qr_png, "wb") as f:
+        subprocess.run([CURL_BIN, "-s", "--max-time", "15",
+                        f"https://authserver.nuaa.edu.cn/authserver/qrCode/getCode?uuid={token}"],
+                       stdout=f)
+    if not is_png(QR_PNG):
+        raise RuntimeError("QR endpoint returned non-PNG (likely an HTML page); refresh and retry")
+    show_qr(QR_PNG)
+    print(f"QR generated: {token} -> shown. Ask the user to scan it now.")
+    return token
+
+
+async def qr_loop(ws, initial_token=None):
+    """轮询二维码状态, 用户确认后在无头浏览器会话中提交表单。"""
+    counter = [100]
 
     async def ev(expr):
         r = await cdp_eval(ws, counter[0], expr)
         counter[0] += 1
         return r
 
-    def curl_get(path):
-        url = "https://authserver.nuaa.edu.cn" + path
-        return subprocess.run(["curl", "-s", "--max-time", "10", url],
-                              capture_output=True, text=True).stdout
-
-    async def new_qr():
-        token = curl_get(f"/authserver/qrCode/getToken?ts={int(time.time()*1000)}")
-        if not token or token.startswith("{"):
-            raise RuntimeError("getToken failed: " + str(token)[:100])
-        qr_png = Path(QR_PNG).resolve()  # 常量路径, 仍显式限制在系统临时目录内
-        if not any(qr_png == d or qr_png.is_relative_to(d)
-                   for d in (Path("/tmp").resolve(), Path("/private/tmp"))):
-            raise RuntimeError(f"unexpected qr path: {qr_png}")
-        with open(qr_png, "wb") as f:
-            subprocess.run(["curl", "-s", "--max-time", "15",
-                            f"https://authserver.nuaa.edu.cn/authserver/qrCode/getCode?uuid={token}"],
-                           stdout=f)
-        if not is_png(QR_PNG):
-            raise RuntimeError("QR endpoint returned non-PNG (likely an HTML page); refresh and retry")
-        show_qr(QR_PNG)
-        print(f"QR generated: {token} -> shown. Ask the user to scan it now.")
-        return token
-
-    # 生成二维码(页面可能已经带着未过期 token, 直接重新取一个最稳)
-    token = await new_qr()
+    token = initial_token or generate_qr_sync()
     last_status = None
     while True:
         await asyncio.sleep(2)
-        st = curl_get(f"/authserver/qrCode/getStatus.htl?ts={int(time.time()*1000)}&uuid={token}")
+        st = _curl_get(f"/authserver/qrCode/getStatus.htl?ts={int(time.time()*1000)}&uuid={token}").strip()
         if st != last_status:
             print("scan status:", st)
             last_status = st
         if st == "3":  # 过期
-            token = await new_qr()
+            token = generate_qr_sync()
             last_status = None
         elif st == "1":  # 已确认, 刷新登录页拿新 execution 后立刻提交
             # 关键: 登录页若开了太久, CAS 的 execution 会话过期, 提交会被弹回。
@@ -202,29 +248,51 @@ async def qr_loop(ws):
 
 
 async def main():
-    sys.stdout.reconfigure(line_buffering=True)  # 后台运行时日志实时可见
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    target = args[0] if args else "https://ft.nuaa.edu.cn/jy-application-vod-he-ui/"
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)  # 后台运行时日志实时可见
     state_path = STATE_DEFAULT
     keep = "--keep" in sys.argv
-    for i, a in enumerate(sys.argv):
-        if a == "--state" and i + 1 < len(sys.argv):
+    pos_args = []
+    skip_next = False
+    for i, a in enumerate(sys.argv[1:], 1):
+        if skip_next:
+            skip_next = False
+            continue
+        if a == "--state" and i < len(sys.argv):
             state_path = sys.argv[i + 1]
+            skip_next = True
+            continue
+        if a.startswith("--"):
+            continue
+        pos_args.append(a)
+    target = pos_args[0] if pos_args else "https://ft.nuaa.edu.cn/jy-application-vod-he-ui/"
+
+    if not os.path.exists(CHROME):
+        raise RuntimeError(f"未找到 Chrome/Edge 浏览器可执行文件: {CHROME} (可通过环境变量 CHROME_BIN 指定路径)")
+
+    # 第一步: 立即拉取并展示二维码 (耗时 < 1 秒, 不受 Chrome 启动速度影响)
+    initial_token = generate_qr_sync()
 
     prof = tempfile.mkdtemp(prefix="nuaa-skill-prof-")
     port = free_port()
-    logf = open("/tmp/nuaa-qr-login.log", "a")
+    logf = open(LOG_PATH, "a", encoding="utf-8", errors="replace")
+    popen_kwargs = {"stdout": logf, "stderr": logf}
+    if os.name != "nt":
+        popen_kwargs["start_new_session"] = True
     chrome = subprocess.Popen(
         [CHROME, f"--user-data-dir={prof}", "--headless=new", "--disable-gpu",
-         "--no-first-run", "--no-default-browser-check",
+         "--disable-extensions", "--no-first-run", "--no-default-browser-check",
          f"--remote-debugging-port={port}", f"--user-agent={UA}", target],
-        stdout=logf, stderr=logf, start_new_session=True)
-    print(f"headless chrome pid={chrome.pid} port={port}")
+        **popen_kwargs)
+    print(f"headless chrome pid={chrome.pid} port={port} bin={CHROME}")
 
     try:
         pages = await wait_for_target(port)
         page = pages[0]
-        ws = await websockets.connect(page["webSocketDebuggerUrl"], max_size=80 * 1024 * 1024)
+        import inspect
+        ws_kwargs = {"max_size": 80 * 1024 * 1024}
+        if "proxy" in inspect.signature(websockets.connect).parameters:
+            ws_kwargs["proxy"] = None
+        ws = await websockets.connect(page["webSocketDebuggerUrl"], **ws_kwargs)
         ii = [1]
 
         async def ev(expr):
@@ -232,24 +300,20 @@ async def main():
             ii[0] += 1
             return r
 
-        # 等待页面跳转: SPA 先加载自身框架, 随后才会重定向到统一身份认证。
-        # 不能在 href 一出现 ft.nuaa.edu.cn 就判定已登录——目标 URL 本身就是
-        # ft.nuaa.domain, 首帧必然匹配。必须等够窗口期, 确认它"没有"跳登录页。
+        # 等待页面跳转到统一身份认证
         href = ""
         redirected_to_sso = False
-        for _ in range(25):
+        for _ in range(35):
             await asyncio.sleep(1)
             href = await ev("location.href") or ""
             if "authserver.nuaa.edu.cn" in href:
                 redirected_to_sso = True
                 break
         if not redirected_to_sso:
-            # 25 秒内从未出现登录页: 视为已持有会话(如复用带登录态复用的场景),
-            # 但仍校验 jwt, 缺失则报错要求扫码。
             print("no SSO redirect; assuming existing session")
         else:
             print("redirected to SSO:", href[:80])
-            await qr_loop(ws)
+            await qr_loop(ws, initial_token=initial_token)
             # 登录提交后等 SPA 跳回
             for _ in range(60):
                 await asyncio.sleep(2)
@@ -277,22 +341,32 @@ async def main():
         state = {"jwt": data["jwt"], "tenant": data["tenant"], "page_url": href,
                  "created": time.time()}
         sp = Path(os.path.expanduser(state_path)).resolve()  # --state 来自 argv, 限制写入范围
-        sp_allowed = [Path("/tmp").resolve(), Path("/private/tmp"),
+        sp_allowed = [Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve(),
                       Path.home().resolve(), Path.cwd().resolve()]
+        if os.name != "nt":
+            sp_allowed.append(Path("/private/tmp"))
         if ".." in state_path or not any(
                 sp == d or sp.is_relative_to(d) for d in sp_allowed):
             raise RuntimeError(f"refusing state path: {state_path}")
         # state 里是登录 jwt, 限制为仅文件主可读写(0600), 防同机其他用户读取
         fd = os.open(sp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(state, f)
         print("state saved to", sp, "| jwt len", len(data["jwt"]),
               "| tenant", data["tenant"])
         await ws.close()
     finally:
+        logf.close()
         if not keep:
-            os.killpg(os.getpgid(chrome.pid), signal.SIGTERM)
-            import shutil
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(chrome.pid)],
+                               capture_output=True)
+                time.sleep(0.5)
+            else:
+                try:
+                    os.killpg(os.getpgid(chrome.pid), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
             shutil.rmtree(prof, ignore_errors=True)
 
 

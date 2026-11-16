@@ -19,31 +19,32 @@ description: >-
    (如 "软工") 时先跑 `python3 scripts/nuaa_api.py courses 关键词` 找到 teclId
    (输出含课程名/教师/班级);只给日期时间(如 "09-03 8:55") 时,登录后列出课表
    再按 `courBeginTime` 匹配。
-2. **扫码登录**——`python3 scripts/qr_login.py <页面URL>`(默认不弹窗,独立终端需要弹出可加
+2. **扫码登录**——`python scripts/qr_login.py <页面URL>`(默认不弹窗,独立终端需要弹出可加
    `--open`)。会启动独立无头
-   Chrome 并生成二维码到 `/tmp/nuaa-qr.png`。把二维码**直接展示在对话里**:
-   先把图片复制进当前工作区(如 `cp /tmp/nuaa-qr.png <工作区>/nuaa-扫码登录.png`),
-   再在回复中用 Markdown 图片语法引用(如 `![扫码登录二维码](<工作区>/nuaa-扫码登录.png)`),
+   Chrome 并生成二维码到系统临时目录(`QR_PNG_PATH=...`, POSIX 为 `/tmp/nuaa-qr.png`, Windows 为 `%TEMP%\nuaa-qr.png`)。把二维码**直接展示在对话里**:
+   先把图片复制进当前工作区或构件目录,
+   再在回复中用 Markdown 图片语法引用,
    **请用户用手机(南航App/微信)扫码并在手机上确认**;不要依赖 Preview 弹窗。
    二维码约 5 分钟过期,过期脚本会自动刷新,此时要把新图重新展示给用户。
-   登录成功后写入 `/tmp/nuaa-skill-state.json`(jwt + tenant),随后自动关闭无头 Chrome。
-3. **列出录像**——`python3 scripts/nuaa_api.py list <teclId>` → 显示该课堂所有节课
+   登录成功后写入 `nuaa-skill-state.json`(jwt + tenant),随后自动关闭无头 Chrome。
+3. **列出录像**——`python scripts/nuaa_api.py list <teclId>` → 显示该课堂所有节课
    (id / 起止时间 / 教师)。一个课堂通常含多节课,注意用用户说的时间匹配。
-4. **取播放地址**——`python3 scripts/nuaa_api.py url <courseId>` → 输出
+4. **取播放地址**——`python scripts/nuaa_api.py url <courseId>` → 输出
    vodserver.nuaa.edu.cn 的 mp4 直链(带 auth_key, 有时效,拿到后尽快下载)。
-5. **下载**——`python3 scripts/download_mp4.py "<mp4_url>" "~/Downloads/课程名_教师_日期_时间.mp4"`
+5. **下载**——`python scripts/download_mp4.py "<mp4_url>" "~/Downloads/课程名_教师_日期_时间.mp4"`
    (4 路并行分段 + 合并 + ffprobe 校验)。
-6. **AI 字幕(可选)**——`python3 scripts/nuaa_api.py subtitle <courseId> [out.srt]`。
-   字幕接口用**明文 courseId**(不加密),返回 `{bg, ed, res}` 毫秒时间轴条目,
-   脚本直接转成 SRT(带 BOM, Mac/Win 播放器都能识别)。注意:字幕是平台侧
-   AI 转写按课生成的,**有的课没有**(返回 `data:[]`),过几天可能就有了。
+6. **AI 字幕(可选)**——
+   - 单节课 SRT: `python scripts/nuaa_api.py subtitle <courseId> [out.srt]`
+   - 整门课批量导出清洗版 Markdown: `python scripts/nuaa_api.py subtitles-all <teclId> [out_dir]`
+   字幕接口用**明文 courseId**(不加密),返回 `{bg, ed, res}` 毫秒时间轴条目。
+   注意:字幕是平台侧 AI 转写按课生成的,**有的课没有**(返回 `data:[]`),过几天可能就有了。
 7. **收尾**——核对 ffprobe 时长与平台显示一致,删除 `/tmp/nuaa-skill-state.json`
    与 `/tmp/nuaa-qr*.png`。向用户汇报文件路径与校验结果。
 
 依赖: 系统的 python3 + venv(pip 可联网,首次运行自动装 websockets/pycryptodome
 到 `~/.cache/nuaa-course-video/venv`)、curl、ffprobe(ffmpeg)。二维码在 ZCode
 对话内直接展示(任意系统);脚本默认不弹窗,独立 CLI 场景如确需弹出可显式加
-`--open`(仅 macOS 有效)。
+`--open`(支持 macOS Preview 与 Windows 默认图片查看器)。
 
 ## 已确认的关键事实(2026-09 实测,勿随意绕过)
 

@@ -13,3 +13,7 @@ __pycache__/
 /tmp/
 *.srt
 *.mp4
+*.log
+output/
+subtitles_*/
+*---字幕/

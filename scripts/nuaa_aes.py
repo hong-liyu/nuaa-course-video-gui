@@ -15,16 +15,26 @@ import hashlib, base64, os, subprocess, sys, urllib.parse
 VENV_DIR = os.path.expanduser("~/.cache/nuaa-course-video/venv")
 
 
+def _venv_python():
+    if os.name == "nt":
+        return os.path.join(VENV_DIR, "Scripts", "python.exe")
+    return os.path.join(VENV_DIR, "bin", "python3")
+
+
 def bootstrap_venv():
     try:
         from Crypto.Cipher import AES  # noqa: F401
         return
     except ImportError:
         pass
-    if not os.path.exists(VENV_DIR + "/bin/python3"):
+    vpy = _venv_python()
+    if not os.path.exists(vpy):
+        os.makedirs(os.path.dirname(VENV_DIR), exist_ok=True)
         subprocess.run([sys.executable, "-m", "venv", VENV_DIR], check=True)
-    subprocess.run([VENV_DIR + "/bin/pip", "install", "-q", "pycryptodome"], check=True)
-    os.execv(VENV_DIR + "/bin/python3", [VENV_DIR + "/bin/python3"] + sys.argv)
+    subprocess.run([vpy, "-m", "pip", "install", "-q", "pycryptodome"], check=True)
+    if os.name == "nt":
+        sys.exit(subprocess.call([vpy] + sys.argv))
+    os.execv(vpy, [vpy] + sys.argv)
 
 
 bootstrap_venv()

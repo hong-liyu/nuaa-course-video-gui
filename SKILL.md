@@ -42,7 +42,7 @@ description: >-
    与 `/tmp/nuaa-qr*.png`。向用户汇报文件路径与校验结果。
 
 依赖: 系统的 python3 + venv(pip 可联网,首次运行自动装 websockets/pycryptodome
-到 `~/.cache/nuaa-course-video/venv`)、curl、ffprobe(ffmpeg)。二维码在 ZCode
+到 `~/.cache/nuaa-course-video/venv`)、curl、ffprobe(ffmpeg)。二维码可在界面或
 对话内直接展示(任意系统);脚本默认不弹窗,独立 CLI 场景如确需弹出可显式加
 `--open`(支持 macOS Preview 与 Windows 默认图片查看器)。
 
